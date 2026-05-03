@@ -4,3 +4,6 @@ httpx
 requests
 flask
 flask-cors
+flask
+requests
+gunicorn
