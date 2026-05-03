@@ -1,8 +1,8 @@
 """
 flask_app.py
 ────────────
-Flask-based OpenAI-compatible API wrapper for chat.z.ai.
-Perfect for PythonAnywhere's native WSGI environment.
+Flask-based transparent proxy for chat.z.ai.
+Zero modification — raw SSE bytes from Z.ai are forwarded as-is to the client.
 """
 
 import uuid
@@ -72,13 +72,14 @@ class SyncZAIClient:
                     return " ".join([p.get("text", "") for p in content if p.get("type") == "text"])
         return ""
 
-    def stream_zai_deltas(self, messages: list):
+    def raw_stream(self, messages: list):
+        """Yields raw bytes chunks exactly as received from Z.ai — no parsing."""
         token = self.get_token()
-        
-        chat_id = str(uuid.uuid4())
-        message_id = str(uuid.uuid4())
+
+        chat_id      = str(uuid.uuid4())
+        message_id   = str(uuid.uuid4())
         timestamp_ms = str(int(time.time() * 1000))
-        request_id = str(uuid.uuid4())
+        request_id   = str(uuid.uuid4())
 
         payload_dict = {
             "stream": True,
@@ -101,46 +102,39 @@ class SyncZAIClient:
         }
 
         payload_str = json.dumps(payload_dict, separators=(',', ':'))
-        signature = hashlib.sha256(payload_str.encode('utf-8')).hexdigest()
+        signature   = hashlib.sha256(payload_str.encode('utf-8')).hexdigest()
 
         url_params = {
             "version": "0.0.1", "platform": "web",
-            "timestamp": timestamp_ms, "requestId": request_id, "signature_timestamp": timestamp_ms
+            "timestamp": timestamp_ms, "requestId": request_id,
+            "signature_timestamp": timestamp_ms
         }
 
         headers = self.session.headers.copy()
         headers["Authorization"] = f"Bearer {token}"
-        headers["x-signature"] = signature
+        headers["x-signature"]   = signature
 
-        resp = self.session.post(CHAT_URL, data=payload_str, headers=headers, params=url_params, stream=True, timeout=60)
+        resp = self.session.post(
+            CHAT_URL, data=payload_str, headers=headers,
+            params=url_params, stream=True, timeout=60
+        )
 
         # Retry once on 401
         if resp.status_code == 401:
             token = self.authenticate()
             headers["Authorization"] = f"Bearer {token}"
-            resp = self.session.post(CHAT_URL, data=payload_str, headers=headers, params=url_params, stream=True, timeout=60)
+            resp = self.session.post(
+                CHAT_URL, data=payload_str, headers=headers,
+                params=url_params, stream=True, timeout=60
+            )
 
         resp.raise_for_status()
 
-        for raw_line in resp.iter_lines():
-            if not raw_line: continue
-            line = raw_line.decode('utf-8').strip()
-            if not line.startswith("data:"): continue
-            
-            json_str = line[5:].strip()
-            if json_str == "[DONE]": break
+        # Yield raw bytes exactly as they arrive — no decode, no parse, no touch
+        for chunk in resp.iter_content(chunk_size=None):
+            if chunk:
+                yield chunk
 
-            try:
-                data_obj = json.loads(json_str)
-                if data_obj.get("type") == "chat:completion":
-                    inner = data_obj.get("data", {})
-                    if inner.get("phase") == "answer":
-                        delta = inner.get("delta_content", "")
-                        if delta: yield delta
-                    elif "error" in inner:
-                        yield f"\n[API Error: {inner['error'].get('detail', 'Unknown')}]"
-            except json.JSONDecodeError:
-                continue
 
 # ── Flask App ───────────────────────────────────────────────────────────────
 
@@ -148,56 +142,34 @@ app = Flask(__name__)
 CORS(app)
 zai_client = SyncZAIClient()
 
+
 @app.route("/ping", methods=["GET"])
 def ping():
     return jsonify({"status": "ok", "message": "Z.ai Flask Wrapper running on PythonAnywhere!"})
 
+
 @app.route("/v1/chat/completions", methods=["POST"])
 @app.route("/chat/completions", methods=["POST"])
 def chat_completions():
-    body = request.get_json(silent=True) or {}
+    body     = request.get_json(silent=True) or {}
     messages = body.get("messages", [])
-    stream_to_client = body.get("stream", False)
 
-    if stream_to_client:
-        def generate():
-            chunk_id = f"chatcmpl-{uuid.uuid4()}"
-            created = int(time.time())
-            try:
-                for delta in zai_client.stream_zai_deltas(messages):
-                    chunk = {
-                        "id": chunk_id, "object": "chat.completion.chunk", "created": created,
-                        "model": DEFAULT_MODEL, "choices": [{"index": 0, "delta": {"content": delta}, "finish_reason": None}]
-                    }
-                    yield f"data: {json.dumps(chunk)}\n\n"
-                
-                stop_chunk = {
-                    "id": chunk_id, "object": "chat.completion.chunk", "created": created,
-                    "model": DEFAULT_MODEL, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
-                }
-                yield f"data: {json.dumps(stop_chunk)}\n\n"
-                yield "data: [DONE]\n\n"
-            except Exception as e:
-                yield f"data: {json.dumps({'error': str(e)})}\n\n"
-
-        return Response(generate(), mimetype="text/event-stream")
-
-    else:
+    def generate():
         try:
-            full_text = ""
-            for delta in zai_client.stream_zai_deltas(messages):
-                full_text += delta
-
-            return jsonify({
-                "id": f"chatcmpl-{uuid.uuid4()}",
-                "object": "chat.completion",
-                "created": int(time.time()),
-                "model": DEFAULT_MODEL,
-                "choices": [{"index": 0, "message": {"role": "assistant", "content": full_text}, "finish_reason": "stop"}],
-                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-            })
+            for raw_chunk in zai_client.raw_stream(messages):
+                yield raw_chunk
         except Exception as e:
-            return jsonify({"error": {"message": str(e)}}), 500
+            yield f"data: {json.dumps({'error': str(e)})}\n\n".encode()
+
+    return Response(
+        generate(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control"    : "no-cache",
+            "X-Accel-Buffering": "no",
+        }
+    )
+
 
 @app.route("/v1/models", methods=["GET"])
 def list_models():
@@ -205,6 +177,7 @@ def list_models():
         "object": "list",
         "data": [{"id": DEFAULT_MODEL, "object": "model", "created": int(time.time()), "owned_by": "z-ai"}]
     })
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000)
