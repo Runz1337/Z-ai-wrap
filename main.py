@@ -22,7 +22,7 @@ Endpoints:
     POST /v1/chat/completions
 
 Extra POST body params (beyond standard OpenAI):
-    web_search      bool  – enable web search          (default: false)
+    web_search      bool  – enable web search          (default: true)
     enable_thinking bool  – enable reasoning/thinking  (default: true)
     tools           list  – OpenAI function-calling tools
     tool_choice     any   – OpenAI tool_choice value
@@ -47,6 +47,29 @@ CHAT_URL      = f"{ZAI_BASE}/api/v2/chat/completions"
 MODELS_URL    = f"{ZAI_BASE}/api/models"
 DEFAULT_MODEL = "GLM-5-Turbo"
 FE_VERSION    = "prod-fe-1.1.21"
+
+# Fallback model list used when /api/models is unreachable.
+# Sources: https://docs.z.ai (confirmed May 2026)
+KNOWN_MODELS = [
+    # ── Language models ───────────────────────────────────────────
+    "GLM-5.1",           # latest flagship, best agentic/coding
+    "GLM-5",             # previous flagship, strong coding
+    "GLM-5-Turbo",       # fast/cheap daily-use variant
+    "GLM-4.7",
+    "GLM-4.6",
+    "GLM-4.5",
+    "GLM-4-32B-0414-128K",
+    # ── Vision-language models ────────────────────────────────────
+    "GLM-5V-Turbo",      # vision + text
+    "GLM-4.6V",
+    "GLM-4.5V",
+    "GLM-OCR",
+    "AutoGLM-Phone-Multilingual",
+]
+
+# Case-normalisation map: any casing the user sends → exact upstream ID.
+# Entries are lowercased keys so lookup is always .lower().
+MODEL_ALIASES = {m.lower(): m for m in KNOWN_MODELS}
 
 _DIR       = os.path.dirname(os.path.abspath(__file__))
 TOKEN_FILE = os.path.join(_DIR, ".zai_token")
@@ -140,8 +163,7 @@ def build_upstream_payload(model, messages, opts: dict):
     without that header and the server accepts it — we follow the same approach.
     """
     enable_thinking = opts.get("enable_thinking", True)
-    web_search      = opts.get("web_search", False)
-    auto_web_search = opts.get("web_search", True)
+    web_search      = opts.get("web_search", True)
     tools           = opts.get("tools")
     tool_choice     = opts.get("tool_choice")
 
@@ -164,7 +186,7 @@ def build_upstream_payload(model, messages, opts: dict):
         "features": {
             "image_generation": False,
             "web_search"      : web_search,
-            "auto_web_search" : auto_web_search,
+            "auto_web_search" : True,   # always on per user request
             "preview_mode"    : True,
             "flags"           : [],
             "enable_thinking" : enable_thinking,
@@ -277,10 +299,11 @@ def _format_citations(d: dict) -> str:
 
 def _do_chat(body: dict):
     model           = body.get("model", DEFAULT_MODEL)
+    model           = MODEL_ALIASES.get(model.lower(), model)  # normalise casing
     messages        = body.get("messages", [])
     want_stream     = body.get("stream", False)
     enable_thinking = body.get("enable_thinking", True)
-    web_search      = body.get("web_search", False)
+    web_search      = body.get("web_search", True)
     tools           = body.get("tools") or None
     tool_choice     = body.get("tool_choice") or None
     chat_id         = "chatcmpl-" + uuid.uuid4().hex[:24]
@@ -452,7 +475,7 @@ def route_models():
         ids  = [m["id"] for m in (data if isinstance(data, list) else data.get("data", []))]
     except Exception as e:
         log.warning("Could not fetch model list (%s). Returning default.", e)
-        ids = [DEFAULT_MODEL]
+        ids = KNOWN_MODELS
 
     return jsonify({
         "object": "list",
@@ -480,7 +503,7 @@ def route_index():
         "base_url" : "/v1",
         "endpoints": ["GET /v1/models", "POST /v1/chat/completions"],
         "extra_params": {
-            "web_search"     : "bool (default false)",
+            "web_search"     : "bool (default true, auto_web_search always true)",
             "enable_thinking": "bool (default true)",
             "tools"          : "list – OpenAI function-calling",
             "tool_choice"    : "any",
