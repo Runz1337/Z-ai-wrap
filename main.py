@@ -194,65 +194,53 @@ def ping():
 def chat_completions():
     body = request.get_json(silent=True) or {}
     messages = body.get("messages", [])
-    stream_to_client = body.get("stream", False)
+    # Always stream — Z.ai is a streaming-only backend.
+    # Clients that send stream=false will still receive SSE; wrap with a
+    # buffering proxy if you need a single-shot JSON response downstream.
 
-    if stream_to_client:
-        def generate():
-            chunk_id = f"chatcmpl-{uuid.uuid4()}"
-            created = int(time.time())
-            try:
-                for delta_type, delta_text in zai_client.stream_zai_deltas(messages):
-                    if delta_type == "role":
-                        # OpenAI-style role announcement chunk
-                        delta_obj = {"role": "assistant", "content": ""}
-                    elif delta_type == "reasoning_content":
-                        delta_obj = {"reasoning_content": delta_text}
-                    else:  # "content"
-                        delta_obj = {"content": delta_text}
-
-                    chunk = {
-                        "id": chunk_id, "object": "chat.completion.chunk", "created": created,
-                        "model": DEFAULT_MODEL,
-                        "choices": [{"index": 0, "delta": delta_obj, "finish_reason": None}]
-                    }
-                    yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
-
-                stop_chunk = {
-                    "id": chunk_id, "object": "chat.completion.chunk", "created": created,
-                    "model": DEFAULT_MODEL,
-                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
-                }
-                yield f"data: {json.dumps(stop_chunk)}\n\n"
-                yield "data: [DONE]\n\n"
-            except Exception as e:
-                yield f"data: {json.dumps({'error': str(e)})}\n\n"
-
-        return Response(generate(), mimetype="text/event-stream")
-
-    else:
+    def generate():
+        chunk_id = f"chatcmpl-{uuid.uuid4()}"
+        created = int(time.time())
         try:
-            full_text = ""
-            reasoning_text = ""
             for delta_type, delta_text in zai_client.stream_zai_deltas(messages):
-                if delta_type == "reasoning_content":
-                    reasoning_text += delta_text
-                elif delta_type == "content":
-                    full_text += delta_text
+                if delta_type == "role":
+                    delta_obj = {"role": "assistant", "content": ""}
+                elif delta_type == "reasoning_content":
+                    delta_obj = {"reasoning_content": delta_text}
+                else:  # "content"
+                    delta_obj = {"content": delta_text}
 
-            response_body = {
-                "id": f"chatcmpl-{uuid.uuid4()}",
-                "object": "chat.completion",
-                "created": int(time.time()),
+                chunk = {
+                    "id": chunk_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": DEFAULT_MODEL,
+                    "choices": [{"index": 0, "delta": delta_obj, "finish_reason": None}]
+                }
+                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+
+            stop_chunk = {
+                "id": chunk_id,
+                "object": "chat.completion.chunk",
+                "created": created,
                 "model": DEFAULT_MODEL,
-                "choices": [{"index": 0, "message": {"role": "assistant", "content": full_text}, "finish_reason": "stop"}],
-                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
             }
-            if reasoning_text:
-                response_body["choices"][0]["message"]["reasoning_content"] = reasoning_text
+            yield f"data: {json.dumps(stop_chunk)}\n\n"
+            yield "data: [DONE]\n\n"
 
-            return jsonify(response_body)
         except Exception as e:
-            return jsonify({"error": {"message": str(e)}}), 500
+            err_chunk = {"error": str(e)}
+            yield f"data: {json.dumps(err_chunk)}\n\n"
+
+    return Response(
+        generate(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",   # disables nginx buffering on PythonAnywhere
+        }
+    )
 
 @app.route("/v1/models", methods=["GET"])
 def list_models():
