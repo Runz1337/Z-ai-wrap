@@ -141,6 +141,7 @@ def build_upstream_payload(model, messages, opts: dict):
     """
     enable_thinking = opts.get("enable_thinking", True)
     web_search      = opts.get("web_search", False)
+    auto_web_search = opts.get("web_search", True)
     tools           = opts.get("tools")
     tool_choice     = opts.get("tool_choice")
 
@@ -163,7 +164,7 @@ def build_upstream_payload(model, messages, opts: dict):
         "features": {
             "image_generation": False,
             "web_search"      : web_search,
-            "auto_web_search" : web_search,
+            "auto_web_search" : auto_web_search,
             "preview_mode"    : True,
             "flags"           : [],
             "enable_thinking" : enable_thinking,
