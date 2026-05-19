@@ -20,7 +20,7 @@ TOKEN_FILE     = os.path.join(os.path.dirname(__file__), ".zai_token")
 AUTH_URL       = "https://chat.z.ai/api/v1/auths/"
 CHAT_URL       = "https://chat.z.ai/api/v2/chat/completions"
 OUTPUT_MODEL   = "z-ai/glm-5.1"
-INTERNAL_MODEL = "GLM-5-Turbo"
+INTERNAL_MODEL = "glm-4.7"
 
 BASE_HEADERS = {
     "User-Agent"   : "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
